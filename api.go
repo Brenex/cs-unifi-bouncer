@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/filipowm/go-unifi/unifi"
 	"github.com/rs/zerolog/log"
@@ -162,6 +163,27 @@ func (mal *unifiAddrList) postFirewallGroup(ctx context.Context, ID string, grou
 		newGroup, err = mal.c.CreateFirewallGroup(ctx, unifiSite, group)
 	}
 
+
+	// UniFi can expire its login session while the bouncer is running.
+	// Only retry the observed HTTP 401, once, with a new client.
+	if err != nil && strings.Contains(err.Error(), "Server error (401)") {
+		log.Warn().Err(err).Str("group", groupName).Msg("UniFi session unauthorized; reconnecting and retrying once")
+		refreshed, authErr := dial()
+		if authErr != nil {
+			log.Error().Err(authErr).Msg("UniFi reauthentication failed")
+		} else {
+			mal.c = refreshed
+			if ID != "" {
+				_, err = mal.c.UpdateFirewallGroup(ctx, unifiSite, group)
+			} else {
+				newGroup, err = mal.c.CreateFirewallGroup(ctx, unifiSite, group)
+			}
+			if err == nil {
+				log.Info().Str("group", groupName).Msg("UniFi reauthentication and firewall-group retry succeeded")
+			}
+		}
+	}
+
 	if err != nil {
 		// If updating and got "not found", it means no changes were needed (UniFi returns empty data)
 		if ID != "" && errors.Is(err, unifi.ErrNotFound) {
@@ -169,7 +191,7 @@ func (mal *unifiAddrList) postFirewallGroup(ctx context.Context, ID string, grou
 			mal.firewallGroups[ipv6][group.Name] = group.ID
 			return group.ID
 		}
-		log.Fatal().Err(err).Msgf("Failed to post firewall group: %v", group)
+		log.Fatal().Err(err).Str("group", groupName).Msg("Failed to post firewall group")
 		return ""
 	} else {
 		if newGroup != nil {
